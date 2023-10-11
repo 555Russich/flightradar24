@@ -1,4 +1,5 @@
 import logging
+import random
 import time
 from pathlib import Path
 from datetime import datetime
@@ -15,6 +16,9 @@ FILEPATH_LOGGER = Path('flightradar.log')
 FILEPATH_INPUT_TXT = Path('input.txt')
 FILEPATH_OUTPUT_XLSX = Path('output.xlsx')
 
+MAX_RETRIES = 5
+RETRY_SLEEP_RANGE = (30, 60)
+DEFAULT_SLEEP = 1
 DOMAIN = 'https://www.flightradar24.com'
 HEADERS = {
     'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
@@ -31,6 +35,23 @@ HEADERS = {
 }
 
 
+def _get_request(
+        url: str,
+        retries: int = MAX_RETRIES,
+        sleep_range: tuple[int, int] = RETRY_SLEEP_RANGE,
+        **kwargs
+) -> requests.Response:
+    for retry in range(1, retries+1):
+        response = requests.get(url, **kwargs)
+        if response.ok:
+            return response
+
+        sleep_time = random.randint(*sleep_range)
+        logging.warning(f'Retry {retry}/{retries} | {response.status_code=}! Sleeping for {sleep_time} seconds')
+        time.sleep(sleep_time)
+    raise Exception(f'Failed {retries} retries!')
+
+
 def get_raw_inputs(filepath: Path) -> list[str]:
     if filepath.exists() is False:
         raise Exception(f'Need to create {filepath}')
@@ -39,7 +60,7 @@ def get_raw_inputs(filepath: Path) -> list[str]:
 
 
 def get_existing_airlines() -> list[tuple[str, str]]:
-    response = requests.get(f'{DOMAIN}/data/airlines', headers=HEADERS)
+    response = _get_request(f'{DOMAIN}/data/airlines', headers=HEADERS)
     soup = BeautifulSoup(response.text, 'html5lib')
     table = soup.find('table', {'id': 'tbl-datatable'})
 
@@ -73,13 +94,13 @@ def define_inputs_type(existing_airlines: list[tuple[str, str]], inputs: list[st
 
 
 def get_airline_fleet(airline_href: str) -> list[str]:
-    response = requests.get(f'{DOMAIN}{airline_href}/fleet', headers=HEADERS)
+    response = _get_request(f'{DOMAIN}{airline_href}/fleet', headers=HEADERS)
     soup = BeautifulSoup(response.text, 'html5lib')
     return [a.text.strip().lower() for a in soup.find_all('a', class_='regLinks')]
 
 
 def get_aircraft_history(aircraft_number: str) -> ...:
-    response = requests.get(f'{DOMAIN}/data/aircraft/{aircraft_number}', headers=HEADERS, allow_redirects=False)
+    response = _get_request(url=f'{DOMAIN}/data/aircraft/{aircraft_number}', headers=HEADERS, allow_redirects=False)
     if response.status_code == 302:
         raise Exception(f'{aircraft_number=} seems does not exists!')
 
@@ -145,7 +166,7 @@ def main():
         for flight in get_aircraft_history(aircraft_number):
             if flight not in data_in_xlsx:
                 data_to_append.append(flight)
-        time.sleep(1)
+        time.sleep(DEFAULT_SLEEP)
 
     logging.info(f'Appending {len(data_to_append)} new flights to "{FILEPATH_OUTPUT_XLSX.name}"')
     write_to_excel(FILEPATH_OUTPUT_XLSX, data_to_append)
