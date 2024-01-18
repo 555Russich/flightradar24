@@ -160,13 +160,27 @@ web
 
                 duration = d['time']['other']['duration']
 
+                if d['airport']['origin']:
+                    from_city = d['airport']['origin']['position']['region']['city']
+                    from_iata = d['airport']['origin']['code']['iata']
+                    from_ = f'{from_city} ({from_iata})'
+                else:
+                    from_ = None
+
+                if d['airport']['destination']:
+                    to_city = d['airport']['destination']['position']['region']['city']
+                    to_iata = d['airport']['destination']['code']['iata']
+                    to = f'{to_city} ({to_iata})'
+                else:
+                    to = None
+
                 flight = {
                     'NUMBER': aircraft_number.upper(),
                     'AIRLINE': aircraft['airline']['name'],
                     'MODEL': aircraft['model']['text'],
                     'DATE': date.strftime('%d.%m.%Y'),
-                    'FROM': d['airport']['origin']['name'] if d['airport']['origin'] else None,
-                    'TO': d['airport']['destination']['name'] if d['airport']['destination'] else None,
+                    'FROM': from_,
+                    'TO': to,
                     'FLIGHT': d['identification']['number']['default'],
                     'FLIGHT TIME': time.strftime('%H:%M', time.gmtime(duration)) if duration else None,
                     'STATUS': text_status
