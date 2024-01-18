@@ -11,6 +11,9 @@ import tqdm
 
 from my_logging import get_logger
 
+LOGIN = ''
+PASSWORD = ''
+DATE_FROM = '01.01.2023'
 
 FILEPATH_LOGGER = Path('flightradar.log')
 FILEPATH_INPUT_TXT = Path('input.txt')
@@ -35,42 +38,153 @@ HEADERS = {
 }
 
 
-def _get_request(
-        url: str,
-        retries: int = MAX_RETRIES,
-        sleep_range: tuple[int, int] = RETRY_SLEEP_RANGE,
-        **kwargs
-) -> requests.Response:
-    for retry in range(1, retries+1):
-        response = requests.get(url, **kwargs)
-        if response.ok:
-            return response
+class Scraper:
+    def __init__(self):
+        self._session = requests.Session()
 
-        sleep_time = random.randint(*sleep_range)
-        logging.warning(f'Retry {retry}/{retries} | {response.status_code=}! Sleeping for {sleep_time} seconds')
-        time.sleep(sleep_time)
-    raise Exception(f'Failed {retries} retries!')
+    @property
+    def token(self) -> str:
+        return self._session.cookies.get('_frPl')
 
+    def login(self, login: str, password: str):
+        headers = HEADERS.copy()
+        headers['content-type'] = 'multipart/form-data; boundary=----WebKitFormBoundarywznYKz3LiItMDEVe'
+        data = f'''------WebKitFormBoundarywznYKz3LiItMDEVe
+Content-Disposition: form-data; name="email"
 
-def get_raw_inputs(filepath: Path) -> list[str]:
-    if filepath.exists() is False:
-        raise Exception(f'Need to create {filepath}')
+{login}
+------WebKitFormBoundarywznYKz3LiItMDEVe
+Content-Disposition: form-data; name="password"
 
-    return [x.strip().lower() for x in filepath.read_text(encoding='utf-8').split('\n') if x]
+{password}
+------WebKitFormBoundarywznYKz3LiItMDEVe
+Content-Disposition: form-data; name="remember"
 
+true
+------WebKitFormBoundarywznYKz3LiItMDEVe
+Content-Disposition: form-data; name="type"
 
-def get_existing_airlines() -> list[tuple[str, str]]:
-    response = _get_request(f'{DOMAIN}/data/airlines', headers=HEADERS)
-    soup = BeautifulSoup(response.text, 'html5lib')
-    table = soup.find('table', {'id': 'tbl-datatable'})
+web
+------WebKitFormBoundarywznYKz3LiItMDEVe--
+'''
+        resp = self._session.post(url=f'{DOMAIN}/user/login', headers=headers, data=data)
+        if resp.status_code != 200:
+            raise Exception(f'Logging failed {resp.status_code=}')
 
-    existing_airlines = []
-    for td in table.find_all('td', class_='notranslate'):
-        a = td.find('a')
-        text = a.get_text()
-        href = a.get('href')
-        existing_airlines.append((text, href))
-    return existing_airlines
+    def _get_request(
+            self,
+            url: str,
+            retries: int = MAX_RETRIES,
+            sleep_range: tuple[int, int] = RETRY_SLEEP_RANGE,
+            **kwargs
+    ) -> requests.Response:
+        for retry in range(1, retries+1):
+            response = requests.get(url, **kwargs)
+            if response.ok:
+                return response
+
+            sleep_time = random.randint(*sleep_range)
+            logging.warning(f'Retry {retry}/{retries} | {response.status_code=}! Sleeping for {sleep_time} seconds')
+            time.sleep(sleep_time)
+        raise Exception(f'Failed {retries} retries!')
+
+    def get_existing_airlines(self) -> list[tuple[str, str]]:
+        response = self._get_request(f'{DOMAIN}/data/airlines', headers=HEADERS)
+        soup = BeautifulSoup(response.text, 'html5lib')
+        table = soup.find('table', {'id': 'tbl-datatable'})
+
+        existing_airlines = []
+        for td in table.find_all('td', class_='notranslate'):
+            a = td.find('a')
+            text = a.get_text()
+            href = a.get('href')
+            existing_airlines.append((text, href))
+        return existing_airlines
+
+    def get_airline_fleet(self, airline_href: str) -> list[str]:
+        response = self._get_request(f'{DOMAIN}{airline_href}/fleet', headers=HEADERS)
+        soup = BeautifulSoup(response.text, 'html5lib')
+        return [a.text.strip().lower() for a in soup.find_all('a', class_='regLinks')]
+
+    def get_aircraft_history(self, aircraft_number: str, earliest_date: datetime | None = None) -> list[dict]:
+        headers = {
+            'authority': 'api.flightradar24.com',
+            'accept': '*/*',
+            'accept-language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            'origin': 'https://www.flightradar24.com',
+            'referer': 'https://www.flightradar24.com/',
+            'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-site',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        }
+        params = {
+            'query': aircraft_number.lower(),
+            'fetchBy': 'reg',
+            'page': 1,
+            'pk': '',
+            'limit': '100',
+            'token': self.token,
+            'timestamp': '',
+            'olderThenFlightId': '',
+        }
+        history = []
+
+        while True:
+            logging.info(f'Sending request to page={params["page"]} aircraft={aircraft_number}')
+            response = self._get_request(
+                url='https://api.flightradar24.com/common/v1/flight/list.json',
+                headers=headers,
+                params=params
+            )
+            data = response.json()['result']['response']
+            aircraft = data['aircraftInfo']
+
+            for d in data['data']:
+                text_status = d['status']['text']
+                if text_status in ['Scheduled']:
+                    continue
+
+                departure_timestamp = d['time']['scheduled']['departure']
+                updated_timestamp = d['time']['other']['updated']
+                if departure_timestamp:
+                    date = datetime.fromtimestamp(departure_timestamp)
+                else:
+                    date = datetime.fromtimestamp(updated_timestamp)
+
+                if earliest_date and date < earliest_date:
+                    return history
+
+                duration = d['time']['other']['duration']
+
+                flight = {
+                    'NUMBER': aircraft_number.upper(),
+                    'AIRLINE': aircraft['airline']['name'],
+                    'MODEL': aircraft['model']['text'],
+                    'DATE': date.strftime('%d.%m.%Y'),
+                    'FROM': d['airport']['origin']['name'] if d['airport']['origin'] else None,
+                    'TO': d['airport']['destination']['name'] if d['airport']['destination'] else None,
+                    'FLIGHT': d['identification']['number']['default'],
+                    'FLIGHT TIME': time.strftime('%H:%M', time.gmtime(duration)) if duration else None,
+                    'STATUS': text_status
+                }
+                if flight in history:
+                    logging.debug(f'Found duplicate {flight=}')
+                else:
+                    history.append(flight)
+
+            if data['page']['more']:
+                params['page'] += 1
+                params['olderThenFlightId'] = data['data'][-1]['identification']['id']
+                last_dept_timestamp = data['data'][-1]['time']['scheduled']['departure']
+                if last_dept_timestamp:
+                    params['timestamp'] = last_dept_timestamp
+                time.sleep(3)
+            else:
+                return history
 
 
 def define_inputs_type(existing_airlines: list[tuple[str, str]], inputs: list[str]) -> dict[str, list]:
@@ -93,33 +207,11 @@ def define_inputs_type(existing_airlines: list[tuple[str, str]], inputs: list[st
     return defined_inputs
 
 
-def get_airline_fleet(airline_href: str) -> list[str]:
-    response = _get_request(f'{DOMAIN}{airline_href}/fleet', headers=HEADERS)
-    soup = BeautifulSoup(response.text, 'html5lib')
-    return [a.text.strip().lower() for a in soup.find_all('a', class_='regLinks')]
+def get_raw_inputs(filepath: Path) -> list[str]:
+    if filepath.exists() is False:
+        raise FileNotFoundError(f'Need to create {filepath}')
 
-
-def get_aircraft_history(aircraft_number: str) -> ...:
-    response = _get_request(url=f'{DOMAIN}/data/aircraft/{aircraft_number}', headers=HEADERS, allow_redirects=False)
-    if response.status_code == 302:
-        raise Exception(f'{aircraft_number=} seems does not exists!')
-
-    soup = BeautifulSoup(response.text, 'html5lib')
-    table = soup.find('table', {'id': 'tbl-datatable'})
-
-    history = []
-    for tr in table.tbody.find_all('tr', class_='data-row'):
-        tds = tr.find_all('td')
-        flight = {
-            'NUMBER': aircraft_number.upper(),
-            'DATE': datetime.fromtimestamp(int(tds[2].get('data-timestamp'))).strftime('%d.%m.%Y'),
-            'FROM': tds[3].text.strip(),
-            'TO': tds[4].text.strip(),
-            'FLIGHT': tds[5].text.strip(),
-            'FLIGHT TIME': tds[6].text
-        }
-        history.append(flight)
-    return history
+    return [x.strip().lower() for x in filepath.read_text(encoding='utf-8').split('\n') if x]
 
 
 def read_from_excel(filepath: Path) -> list[dict]:
@@ -146,13 +238,20 @@ def write_to_excel(filepath: Path, data: list[dict]) -> None:
 
 def main():
     raw_inputs = get_raw_inputs(FILEPATH_INPUT_TXT)
-    existing_airlines = get_existing_airlines()
+    date_from = datetime.strptime(DATE_FROM, '%d.%m.%Y') if DATE_FROM else None
+
+    scraper = Scraper()
+    if LOGIN and PASSWORD:
+        scraper.login(login=LOGIN, password=PASSWORD)
+        logging.info(f'Logged in successfully')
+
+    existing_airlines = scraper.get_existing_airlines()
     defined_inputs = define_inputs_type(existing_airlines=existing_airlines, inputs=raw_inputs)
     logging.info(f'{defined_inputs=}')
 
     aircrafts_to_scrap = defined_inputs['aircrafts']
     for airline_data in defined_inputs['airlines']:
-        airline_fleet = get_airline_fleet(airline_data[1])
+        airline_fleet = scraper.get_airline_fleet(airline_data[1])
         aircrafts_to_scrap += airline_fleet
         logging.info(f'Got {len(airline_fleet)} aircrafts for "{airline_data[0]}" airline')
 
@@ -163,7 +262,7 @@ def main():
 
     data_to_append = []
     for aircraft_number in tqdm.tqdm(aircrafts_to_scrap):
-        for flight in get_aircraft_history(aircraft_number):
+        for flight in scraper.get_aircraft_history(aircraft_number, earliest_date=date_from):
             if flight not in data_in_xlsx:
                 data_to_append.append(flight)
         time.sleep(DEFAULT_SLEEP)
