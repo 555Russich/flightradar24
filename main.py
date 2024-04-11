@@ -11,8 +11,8 @@ import tqdm
 
 from my_logging import get_logger
 
-LOGIN = ''
-PASSWORD = ''
+LOGIN = 'mr.unlife@gmail.com'
+PASSWORD = 'aweryFL24'
 DATE_FROM = '01.01.2023'
 
 FILEPATH_LOGGER = Path('flightradar.log')
@@ -143,7 +143,10 @@ web
             data = response.json()['result']['response']
             aircraft = data['aircraftInfo']
 
-            for d in data['data']:
+            if data['data'] is None:
+                return []
+
+            for d in data.get('data', []):
                 text_status = d['status']['text']
                 if text_status in ['Scheduled']:
                     continue
