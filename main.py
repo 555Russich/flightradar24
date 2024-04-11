@@ -249,7 +249,7 @@ web
                 if flight not in history:
                     history.append(flight)
 
-            if data['page']['current'] == data['page']['total']:
+            if page == -data['page']['total']:
                 return history
             page -= 1
 
