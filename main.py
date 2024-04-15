@@ -346,7 +346,11 @@ def main():
         airline_fleet = scraper.get_airline_fleet(airline_data[1])
         aircrafts_to_scrap += airline_fleet
         logging.info(f'Got {len(airline_fleet)} aircrafts for "{airline_data[0]}" airline')
-    airports_to_scrap = [s.replace('\n', '').lower() for s in FILEPATH_AIRPORTS.read_text().split('\n')]
+
+    airports_to_scrap = [
+        s.replace('\n', '').lower()
+        for s in FILEPATH_AIRPORTS.read_text().split('\n') if s
+    ]
     logging.info(f'\naircrafts={defined_inputs["aircrafts"]}\nairlines={defined_inputs["airlines"]}'
                  f'\nairports={airports_to_scrap}')
 
